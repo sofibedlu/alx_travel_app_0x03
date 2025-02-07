@@ -5,6 +5,7 @@ from .models import Listing, Booking, Payment
 from .serializers import ListingSerializer, BookingSerializer, PaymentSerializer
 import requests, os
 import uuid
+from listings.tasks import send_booking_confirmation_email
 
 class ListingViewSet(viewsets.ModelViewSet):
     queryset = Listing.objects.all()
@@ -88,7 +89,39 @@ class PaymentVerifyView(APIView):
     Verify the payment status with Chapa.
     Expects callback data including 'tx_ref'.
     """
+    
+    def get(self, request):
+        # Get the transaction reference from query parameters.
+        tx_ref = request.query_params.get("trx_ref") or request.query_params.get("tx_ref")
+        status_from_api = request.query_params.get("status")
+        if not tx_ref or not status_from_api:
+            return Response({"error": "Missing parameters"}, status=status.HTTP_400_BAD_REQUEST)
 
+        new_status = "completed" if status_from_api == "success" else "failed"
+
+        try:
+            payment = Payment.objects.get(transaction_id=tx_ref)
+            payment.status = new_status
+            payment.save()
+
+            if new_status == "completed":
+                # Update the booking status and trigger the confirmation email asynchronously.
+                booking = payment.booking
+                booking.status = "confirmed"
+                booking.save()
+                send_booking_confirmation_email.delay(str(booking.booking_id))
+
+        except Payment.DoesNotExist:
+            return Response({"error": "Payment record not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({
+            "message": "Payment verified",
+            "new_status": new_status,
+            "tx_ref": tx_ref
+        }, status=status.HTTP_200_OK)
+
+    # we don't actually need this method, but it's here for reference and simulating using postman
+    """
     def post(self, request):
         tx_ref = request.data.get("tx_ref")
         if not tx_ref:
@@ -107,7 +140,6 @@ class PaymentVerifyView(APIView):
 
         resp_data = response.json()
         status_from_api = resp_data.get("data", {}).get("status")
-        # Set the new status based on the API response. In this sample, 'success' means the payment succeeded.
         new_status = "completed" if status_from_api == "success" else "failed"
 
         try:
@@ -115,6 +147,15 @@ class PaymentVerifyView(APIView):
             payment = Payment.objects.get(transaction_id=tx_ref)
             payment.status = new_status
             payment.save()
+
+            if new_status == "completed":
+                # Update the corresponding booking status to confirmed.
+                booking = payment.booking
+                booking.status = "confirmed"
+                booking.save()
+
+                # Trigger the confirmation email asynchronously.
+                send_booking_confirmation_email.delay(str(booking.booking_id))
         except Payment.DoesNotExist:
             return Response({"error": "Payment record not found"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -123,3 +164,4 @@ class PaymentVerifyView(APIView):
             "new_status": new_status,
             "tx_ref": tx_ref
         }, status=status.HTTP_200_OK)
+    """
